@@ -1,5 +1,3 @@
-package foo
-
 import org.apache.spark.sql.Row
 import cats.implicits._
 import org.apache.spark.sql.types.{DataType, DataTypes, StructField, StructType}
@@ -7,13 +5,9 @@ import org.apache.spark.sql.types.{DataType, DataTypes, StructField, StructType}
 import scala.reflect._
 import scala.reflect.runtime.universe._
 
-trait AutoRow[T] {
-  //implicit val ttag: TypeTag[T] = typeTag[T]
-  //implicit val ctag: ClassTag[T] = classTag[T]
-
-  //val myttag = implicitly[TypeTag[T]]
+abstract class AutoRow[T](implicit tt: TypeTag[T], ct: ClassTag[T]) {
   implicit class ProductRow(p: Product) {
-    def toRow(): Row = {
+    def toRow: Row = {
       Row(p.productIterator.map {
         case Some(value) => value
         case None => null
@@ -22,51 +16,31 @@ trait AutoRow[T] {
     }
   }
 
-//  def toRow()(implicit tag: ClassTag[T]) = {
-//    val fields = tag.runtimeClass.getDeclaredFields.map(f => {
-//      f.setAccessible(true)
-//      f
-//    })
-//    t: T => {
-//      Row(fields.map {
-//        _.get(t) match {
-//          case Some(value) => value
-//          case None => null
-//          case value => value
-//        }
-//      }: _*)
-//    }
-//  }
+  private val rm = runtimeMirror(classTag[T].runtimeClass.getClassLoader)
+  private val classTest = typeOf[T].typeSymbol.asClass
+  private val classMirror = rm.reflectClass(classTest)
+  private val constructor = typeOf[T].decl(termNames.CONSTRUCTOR).asMethod
+  private val constructorMirror = classMirror.reflectConstructor(constructor)
+  private val constructorSymbols = constructor.paramLists.flatten
+  private val constructorParamIsOptional = constructorSymbols
+    .map(_.typeSignature <:< typeOf[Option[_]])
 
-  def fromRow(r: Row)(implicit ctag: ClassTag[T], ttag: TypeTag[T]): T = {
-    val rm = runtimeMirror(classTag[T].runtimeClass.getClassLoader)
-    val classTest = typeOf[T].typeSymbol.asClass
-    val classMirror = rm.reflectClass(classTest)
-    val constructor = typeOf[T].decl(termNames.CONSTRUCTOR).asMethod
-    val constructorMirror = classMirror.reflectConstructor(constructor)
-
-    val signatures = constructor.paramLists.flatten.map(_.typeSignature)
-    val rowValues = r.toSeq.zip(signatures).map {
-      case (value, signature) =>
-        if (signature <:< typeOf[Option[_]]) {
-          Option(value)
-        } else {
-          value
-        }
+  def fromRow(r: Row): T = {
+    val rowValues = r.toSeq.zip(constructorParamIsOptional).map {
+      case (value, true) => Option(value)
+      case (value, false) => value
     }
     constructorMirror(rowValues:_*).asInstanceOf[T]
   }
 
-  def structType()(implicit ctag: ClassTag[T], ttag: TypeTag[T]): StructType = {
-    val constructor = typeOf[T].decl(termNames.CONSTRUCTOR).asMethod
-    val structFields = constructor.paramLists.flatten.map((param: Symbol) => {
+  val structType: StructType = {
+    val structFields = constructorSymbols.map((param: Symbol) => {
       val dt = typeToStructType(param.typeSignature)
       StructField(param.name.toString, dt._1, nullable = dt._2)
     })
     StructType(structFields)
   }
 
-  // scalastyle:off
   private def typeToStructType(t: Type): (DataType, Boolean) = {
     val nullable = t <:< typeOf[Option[_]]
     val rt = if (nullable) {
